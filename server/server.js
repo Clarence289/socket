@@ -23,7 +23,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-mongoose.connect('mongodb://localhost:27017/chatapp', {
+mongoose.connect('mongodb+srv://chatapp:Sc90%2F10%2F27%2F53@cluster0.htbmx9s.mongodb.net/chatapp?retryWrites=true&w=majority', {
   useNewUrlParser: true,
   useUnifiedTopology: true,
 });
