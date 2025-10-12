@@ -1,308 +1,782 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const helmet = require('helmet');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const User = require('./models/User');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 
-const JWT_SECRET = 'your_jwt_secret'; // Use env variable in production
+// Import models
+const User = require('./models/User');
+const Message = require('./models/Message');
+
+// Environment variables with validation
+const JWT_SECRET = process.env.JWT_SECRET;
+const MONGODB_URI = process.env.MONGODB_URI;
+const PORT = process.env.PORT || 5000;
+const NODE_ENV = process.env.NODE_ENV || 'development';
+
+// Validate required environment variables
+if (!JWT_SECRET) {
+  console.error('❌ JWT_SECRET environment variable is required');
+  process.exit(1);
+}
+
+if (!MONGODB_URI) {
+  console.error('❌ MONGODB_URI environment variable is required');
+  process.exit(1);
+}
 
 const app = express();
 const server = http.createServer(app);
 
-app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'http://localhost:3000',
-    'http://192.168.0.203',
-    'http://192.168.0.203:3000'
-  ],
-  credentials: true
+// Trust proxy for hosting platforms
+app.set('trust proxy', 1);
+
+// Security middleware
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      connectSrc: ["'self'", "ws:", "wss:"],
+      imgSrc: ["'self'", "data:", "https:"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+    },
+  }
 }));
-app.use(express.json());
 
-mongoose.connect('mongodb://localhost:27017/chatapp', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
+// Compression middleware
+app.use(compression());
+
+// Rate limiting - more restrictive in production
+const createRateLimit = (windowMs, max, message) => rateLimit({
+  windowMs,
+  max: NODE_ENV === 'production' ? max : max * 10,
+  message: { error: message },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => NODE_ENV === 'development' && req.ip === '127.0.0.1'
 });
-const db = mongoose.connection;
-db.on('error', console.error.bind(console, 'MongoDB connection error:'));
 
-// --- MESSAGE SCHEMA ---
-const messageSchema = new mongoose.Schema({
-  room: String,
-  sender: String,
-  avatar: String,
-  message: String,
-  image: String,
-  voice: String,
-  file: {
-    name: String,
-    url: String
-  },
-  timestamp: { type: Date, default: Date.now },
-  private: Boolean,
-  readBy: [String],
-  reactions: [
-    {
-      reaction: String,
-      user: String
+app.use('/api/auth', createRateLimit(15 * 60 * 1000, 5, 'Too many authentication attempts'));
+app.use('/api/upload', createRateLimit(60 * 1000, 10, 'Too many file uploads'));
+app.use('/api', createRateLimit(15 * 60 * 1000, 100, 'Too many requests'));
+
+// Create uploads directory
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  console.log('📁 Created uploads directory');
+}
+
+// Enhanced CORS configuration for local network + production
+const allowedOrigins = [
+  process.env.FRONTEND_URL,
+  // Local development origins
+  ...(NODE_ENV === 'development' ? [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:5173',
+    // Your local network IP addresses
+    'http://192.168.0.203:3000',
+    'http://192.168.0.203:5173',
+    'http://192.168.0.203:5174',
+    'http://192.168.0.203',
+  ] : []),
+  // Production hosting platforms
+  'https://*.netlify.app',
+  'https://*.vercel.app',
+  'https://*.onrender.com',
+  'https://*.railway.app',
+  'https://*.fly.dev',
+  'https://*.herokuapp.com'
+].filter(Boolean);
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+    
+    // Check if origin matches any allowed pattern
+    const isAllowed = allowedOrigins.some(allowedOrigin => {
+      if (allowedOrigin.includes('*')) {
+        const pattern = allowedOrigin.replace(/\*/g, '.*').replace(/\./g, '\\.');
+        return new RegExp(`^${pattern}$`).test(origin);
+      }
+      return allowedOrigin === origin;
+    });
+    
+    if (isAllowed) {
+      return callback(null, true);
     }
-  ],
-  _clientId: String
-});
-const Message = mongoose.model('Message', messageSchema);
+    
+    console.warn(`❌ CORS blocked origin: ${origin}`);
+    callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+}));
 
-// --- AUTHENTICATION ENDPOINTS ---
+// Body parsing middleware with error handling
+app.use(express.json({ 
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    try {
+      JSON.parse(buf);
+    } catch (e) {
+      res.status(400).json({ error: 'Invalid JSON' });
+      throw new Error('Invalid JSON');
+    }
+  }
+}));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Serve static files with proper headers
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
+  maxAge: NODE_ENV === 'production' ? '7d' : '0',
+  setHeaders: (res, path, stat) => {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+}));
+
+// Enhanced file upload configuration
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadsDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const fileExtension = path.extname(file.originalname);
+    const sanitizedName = file.fieldname.replace(/[^a-zA-Z0-9]/g, '');
+    cb(null, `${sanitizedName}-${uniqueSuffix}${fileExtension}`);
+  }
+});
+
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: NODE_ENV === 'production' ? 10 * 1024 * 1024 : 50 * 1024 * 1024, // 10MB prod, 50MB dev
+    files: 1,
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx|txt|mp3|mp4|avi|mov|webp/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+    
+    if (mimetype && extname) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only images, documents, and media files are allowed.'));
+    }
+  }
+});
+
+// Enhanced MongoDB connection with retry logic
+const connectDB = async (retries = 5) => {
+  try {
+    if (NODE_ENV === 'test') {
+      console.log('Test environment - skipping MongoDB connection');
+      return;
+    }
+    
+    const conn = await mongoose.connect(MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+    });
+    
+    console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
+    
+    // Handle connection events
+    mongoose.connection.on('error', (err) => {
+      console.error('MongoDB connection error:', err);
+    });
+    
+    mongoose.connection.on('disconnected', () => {
+      console.log('MongoDB disconnected');
+      if (retries > 0) {
+        console.log(`Retrying MongoDB connection... (${retries} attempts left)`);
+        setTimeout(() => connectDB(retries - 1), 5000);
+      }
+    });
+    
+  } catch (error) {
+    console.error('MongoDB connection error:', error);
+    if (retries > 0) {
+      console.log(`Retrying MongoDB connection... (${retries} attempts left)`);
+      setTimeout(() => connectDB(retries - 1), 5000);
+    } else {
+      console.error('Failed to connect to MongoDB after multiple attempts');
+      process.exit(1);
+    }
+  }
+};
+
+// Initialize database connection
+connectDB();
+
+// Utility functions
 function isStrongPassword(password) {
-  // At least 8 chars, 1 uppercase, 1 lowercase, 1 number, 1 special char
   return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{8,}$/.test(password);
 }
 
-// Register endpoint
-app.post('/api/register', async (req, res) => {
-  const { email, password, avatar } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
-  if (!isStrongPassword(password)) return res.status(400).json({ error: 'Password must be at least 8 characters and include uppercase, lowercase, number, and special character.' });
+function validateEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function sanitizeInput(input) {
+  if (typeof input !== 'string') return input;
+  return input.trim().replace(/[<>]/g, '');
+}
+
+// JWT verification middleware
+function verifyToken(req, res, next) {
+  const authHeader = req.header('Authorization');
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+  
+  if (!token) {
+    return res.status(401).json({ error: 'Access denied. No token provided.' });
+  }
 
   try {
-    const existingUser = await User.findOne({ email });
-    if (existingUser) return res.status(400).json({ error: 'Email already registered' });
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Token expired.' });
+    }
+    res.status(401).json({ error: 'Invalid token.' });
+  }
+}
 
-    const hashed = await bcrypt.hash(password, 10);
-    const user = await User.create({ email, password: hashed, avatar });
-    const token = jwt.sign({ id: user._id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ success: true, user: { email: user.email, avatar: user.avatar }, token });
-  } catch (err) {
-    if (err.code === 11000 && err.keyPattern && err.keyPattern.email) {
+// Request logging (only in development)
+if (NODE_ENV === 'development') {
+  app.use((req, res, next) => {
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - ${req.ip}`);
+    next();
+  });
+}
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Chat App Server is running!',
+    version: '1.0.0',
+    environment: NODE_ENV,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  const mongoStatus = mongoose.connection.readyState;
+  const statusMap = {
+    0: 'disconnected',
+    1: 'connected',
+    2: 'connecting',
+    3: 'disconnecting'
+  };
+
+  res.json({
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    mongodb: statusMap[mongoStatus] || 'unknown',
+    uptime: Math.floor(process.uptime()),
+    environment: NODE_ENV,
+    version: '1.0.0',
+    memory: process.memoryUsage()
+  });
+});
+
+// Enhanced authentication endpoints
+app.post('/api/register', async (req, res) => {
+  try {
+    const { email, password, avatar } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+    
+    const sanitizedEmail = sanitizeInput(email);
+    
+    if (!validateEmail(sanitizedEmail)) {
+      return res.status(400).json({ error: 'Please provide a valid email address' });
+    }
+    
+    if (!isStrongPassword(password)) {
+      return res.status(400).json({ 
+        error: 'Password must be at least 8 characters and include uppercase, lowercase, number, and special character.' 
+      });
+    }
+
+    const existingUser = await User.findOne({ email: sanitizedEmail.toLowerCase() });
+    if (existingUser) {
       return res.status(400).json({ error: 'Email already registered' });
     }
+
+    const saltRounds = 12;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+    
+    const user = await User.create({ 
+      email: sanitizedEmail.toLowerCase(), 
+      password: hashedPassword, 
+      avatar: sanitizeInput(avatar) || null 
+    });
+    
+    const token = jwt.sign(
+      { id: user._id, email: user.email }, 
+      JWT_SECRET, 
+      { expiresIn: '7d' }
+    );
+    
+    res.status(201).json({ 
+      success: true, 
+      message: 'User registered successfully',
+      user: { 
+        id: user._id,
+        email: user.email, 
+        avatar: user.avatar,
+        createdAt: user.createdAt
+      }, 
+      token 
+    });
+    
+  } catch (err) {
     console.error('Registration error:', err);
-    res.status(500).json({ error: 'Registration failed' });
+    
+    if (err.code === 11000) {
+      return res.status(400).json({ error: 'Email already registered' });
+    }
+    
+    res.status(500).json({ error: 'Registration failed. Please try again.' });
   }
 });
 
-// Login endpoint
 app.post('/api/login', async (req, res) => {
-  const { email, password } = req.body;
-  const user = await User.findOne({ email });
-  if (!user) return res.status(400).json({ error: 'Invalid credentials' });
-  const valid = await bcrypt.compare(password, user.password);
-  if (!valid) return res.status(400).json({ error: 'Invalid credentials' });
-  const token = jwt.sign({ id: user._id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
-  res.json({ success: true, user: { email: user.email, avatar: user.avatar }, token });
+  try {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+    
+    const sanitizedEmail = sanitizeInput(email);
+    
+    const user = await User.findOne({ email: sanitizedEmail.toLowerCase() }).select('+password');
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
+    
+    const isValidPassword = await bcrypt.compare(password, user.password);
+    if (!isValidPassword) {
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
+    
+    const token = jwt.sign(
+      { id: user._id, email: user.email }, 
+      JWT_SECRET, 
+      { expiresIn: '7d' }
+    );
+    
+    res.json({ 
+      success: true, 
+      message: 'Login successful',
+      user: { 
+        id: user._id,
+        email: user.email, 
+        avatar: user.avatar,
+        createdAt: user.createdAt
+      }, 
+      token 
+    });
+    
+  } catch (err) {
+    console.error('Login error:', err);
+    res.status(500).json({ error: 'Login failed. Please try again.' });
+  }
 });
 
-// --- CHAT ENDPOINTS ---
-
-app.get('/api/messages', async (req, res) => {
-  const { room, before } = req.query;
-  if (!room) return res.status(400).json({ error: 'Room required' });
-
-  let query = { room, private: false };
-  if (before) {
-    query.timestamp = { $lt: new Date(before) };
+app.get('/api/profile', verifyToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    res.json({ 
+      success: true, 
+      user: {
+        id: user._id,
+        email: user.email,
+        avatar: user.avatar,
+        createdAt: user.createdAt
+      }
+    });
+  } catch (error) {
+    console.error('Profile fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch profile' });
   }
+});
 
-  const messages = await Message.find(query)
-    .sort({ timestamp: 1 })
-    .limit(20)
-    .exec();
+// Enhanced file upload endpoint
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
 
-  res.json(messages);
+    // Dynamic URL generation for local vs production
+    const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+    const host = req.headers['x-forwarded-host'] || req.headers.host;
+    const baseUrl = process.env.SERVER_URL || 
+      (NODE_ENV === 'production' ? `${protocol}://${host}` : `http://192.168.0.203:${PORT}`);
+    
+    const fileUrl = `${baseUrl}/uploads/${req.file.filename}`;
+    
+    res.json({
+      success: true,
+      file: {
+        name: req.file.originalname,
+        url: fileUrl,
+        type: req.file.mimetype,
+        size: req.file.size,
+        filename: req.file.filename
+      }
+    });
+  } catch (error) {
+    console.error('Upload error:', error);
+    
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: `File too large. Maximum size is ${NODE_ENV === 'production' ? '10MB' : '50MB'}.` });
+    }
+    
+    res.status(500).json({ error: 'Upload failed. Please try again.' });
+  }
+});
+
+// Enhanced chat endpoints
+app.get('/api/messages', async (req, res) => {
+  try {
+    const { room, before, limit = 20 } = req.query;
+    
+    if (!room) {
+      return res.status(400).json({ error: 'Room parameter is required' });
+    }
+
+    const sanitizedRoom = sanitizeInput(room);
+    let query = { room: sanitizedRoom, private: false };
+    
+    if (before) {
+      const beforeDate = new Date(before);
+      if (isNaN(beforeDate.getTime())) {
+        return res.status(400).json({ error: 'Invalid date format' });
+      }
+      query.timestamp = { $lt: beforeDate };
+    }
+
+    const parsedLimit = Math.min(Math.max(parseInt(limit) || 20, 1), 50);
+    
+    const messages = await Message.find(query)
+      .sort({ timestamp: -1 })
+      .limit(parsedLimit)
+      .lean()
+      .exec();
+
+    res.json({
+      success: true,
+      messages: messages.reverse(),
+      count: messages.length
+    });
+    
+  } catch (error) {
+    console.error('Messages fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
 });
 
 app.get('/api/search', async (req, res) => {
-  const { room, q } = req.query;
-  if (!room || !q) return res.status(400).json({ error: 'Room and query required' });
-
-  const results = await Message.find({
-    room,
-    private: false,
-    message: { $regex: q, $options: 'i' }
-  }).sort({ timestamp: 1 }).exec();
-
-  res.json(results);
-});
-
-app.delete('/api/messages/:msgId', async (req, res) => {
-  const { msgId } = req.params;
   try {
-    await Message.deleteOne({ _id: msgId });
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Delete failed' });
+    const { room, q, limit = 20 } = req.query;
+    
+    if (!room || !q) {
+      return res.status(400).json({ error: 'Room and query parameters are required' });
+    }
+
+    const sanitizedRoom = sanitizeInput(room);
+    const sanitizedQuery = sanitizeInput(q);
+
+    if (sanitizedQuery.length < 2) {
+      return res.status(400).json({ error: 'Search query must be at least 2 characters long' });
+    }
+
+    const parsedLimit = Math.min(Math.max(parseInt(limit) || 20, 1), 50);
+
+    const results = await Message.find({
+      room: sanitizedRoom,
+      private: false,
+      message: { $regex: sanitizedQuery, $options: 'i' }
+    })
+    .sort({ timestamp: -1 })
+    .limit(parsedLimit)
+    .lean()
+    .exec();
+
+    res.json({
+      success: true,
+      results,
+      count: results.length,
+      query: sanitizedQuery
+    });
+    
+  } catch (error) {
+    console.error('Search error:', error);
+    res.status(500).json({ error: 'Search failed' });
   }
 });
 
-app.put('/api/messages/:msgId', async (req, res) => {
-  const { msgId } = req.params;
-  const { message } = req.body;
-  try {
-    await Message.updateOne({ _id: msgId }, { $set: { message } });
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Edit failed' });
-  }
-});
-
-app.post('/api/messages/read', async (req, res) => {
-  const { room, email } = req.body;
-  try {
-    await Message.updateMany(
-      { room, private: false, readBy: { $ne: email } },
-      { $push: { readBy: email } }
-    );
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Read update failed' });
-  }
-});
-
-// --- SOCKET.IO SETUP ---
+// Enhanced Socket.IO setup
 const io = new Server(server, {
   cors: {
-    origin: [
-      'http://localhost:5173',
-      'http://localhost:3000',
-      'http://192.168.0.203',
-      'http://192.168.0.203:3000'
-    ],
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true);
+      
+      const isAllowed = allowedOrigins.some(allowedOrigin => {
+        if (allowedOrigin.includes('*')) {
+          const pattern = allowedOrigin.replace(/\*/g, '.*').replace(/\./g, '\\.');
+          return new RegExp(`^${pattern}$`).test(origin);
+        }
+        return allowedOrigin === origin;
+      });
+      
+      if (isAllowed) {
+        return callback(null, true);
+      }
+      
+      callback(new Error('Not allowed by CORS'));
+    },
     methods: ['GET', 'POST'],
     credentials: true,
   },
+  maxHttpBufferSize: NODE_ENV === 'production' ? 5e6 : 1e8, // 5MB prod, 100MB dev
+  pingTimeout: 60000,
+  pingInterval: 25000,
 });
 
 const chatNamespace = io.of('/chat');
 
+// In-memory storage for connected users
 let users = {};
-let nameToSockets = {}; // <-- changed from nameToSocket
+let nameToSockets = {};
 
 chatNamespace.on('connection', (socket) => {
+  console.log(`✅ User connected: ${socket.id}`);
+
   socket.on('user_join', ({ name, room, avatar }) => {
-    users[socket.id] = { name, room, avatar };
-    if (!nameToSockets[name]) nameToSockets[name] = [];
-    nameToSockets[name].push(socket.id);
-    socket.join(room);
+    try {
+      const sanitizedName = sanitizeInput(name);
+      const sanitizedRoom = sanitizeInput(room);
+      const sanitizedAvatar = sanitizeInput(avatar);
 
-    chatNamespace.to(room).emit('user_event', { type: 'join', user: name });
+      users[socket.id] = { 
+        name: sanitizedName, 
+        room: sanitizedRoom, 
+        avatar: sanitizedAvatar, 
+        joinedAt: new Date() 
+      };
+      
+      if (!nameToSockets[sanitizedName]) nameToSockets[sanitizedName] = [];
+      nameToSockets[sanitizedName].push(socket.id);
+      
+      socket.join(sanitizedRoom);
 
-    const roomUsers = Object.values(users)
-      .filter(u => u.room === room)
-      .map(u => u.name);
-    chatNamespace.to(room).emit('active_users', roomUsers);
+      socket.to(sanitizedRoom).emit('user_event', { 
+        type: 'join', 
+        user: sanitizedName, 
+        timestamp: new Date() 
+      });
+
+      const roomUsers = Object.values(users)
+        .filter(u => u.room === sanitizedRoom)
+        .map(u => ({ 
+          name: u.name, 
+          avatar: u.avatar,
+          joinedAt: u.joinedAt
+        }));
+      
+      chatNamespace.to(sanitizedRoom).emit('active_users', roomUsers);
+      
+      console.log(`User ${sanitizedName} joined room ${sanitizedRoom}`);
+    } catch (error) {
+      console.error('Error in user_join:', error);
+      socket.emit('error', { message: 'Failed to join room' });
+    }
   });
 
   socket.on('typing', ({ username, room, isTyping }) => {
-    chatNamespace.to(room).emit('typing', { username, isTyping });
-  });
-
-  // --- REACTION SUPPORT ---
-  socket.on('message_reaction', async ({ msgId, reaction, user, room }) => {
-    await Message.updateOne(
-      { _id: msgId },
-      { $push: { reactions: { reaction, user } } }
-    );
-    chatNamespace.to(room).emit('message_reaction', { msgId, reaction, user });
-  });
-
-  // --- PUBLIC MESSAGE (with file support) ---
-  socket.on('send_message', async (data) => {
-    const user = users[socket.id];
-    const sender = user?.name || 'Anonymous';
-    const room = data.room || user?.room;
-    const avatar = user?.avatar || data.avatar || null;
-
-    const messageData = {
-      sender,
-      room,
-      avatar,
-      message: data.message || '',
-      image: data.image || null,
-      voice: data.voice || null,
-      file: data.file || null,
-      timestamp: new Date(),
-      private: false,
-      readBy: [sender],
-      reactions: [],
-      _clientId: data._clientId || null
-    };
-    await Message.create(messageData);
-
-    chatNamespace.to(room).emit('receive_message', messageData);
-    socket.emit('receive_message', messageData);
-
-    // Push notification event for clients
-    chatNamespace.to(room).emit('push_notification', {
-      title: `New message from ${sender}`,
-      body: messageData.message || (messageData.file ? messageData.file.name : 'Media message')
-    });
-
-    if (data._clientId) {
-      socket.emit('message_ack', { _clientId: data._clientId });
-    }
-  });
-
-  // --- PRIVATE MESSAGE (with file support) ---
-  socket.on('private_message', async (data) => {
-    const user = users[socket.id];
-    const { sender, recipient, message, image, voice, file, _clientId } = data;
-    const recipientSocketIds = nameToSockets[recipient] || [];
-    const avatar = user?.avatar || data.avatar || null;
-
-    const privateMessage = {
-      sender,
-      avatar,
-      message,
-      image,
-      voice,
-      file: file || null,
-      timestamp: new Date(),
-      private: true,
-      room: user?.room,
-      readBy: [sender],
-      reactions: [],
-      _clientId: _clientId || null
-    };
-
-    await Message.create(privateMessage);
-
-    // Send to all sockets for the recipient
-    for (const recipientSocketId of recipientSocketIds) {
-      chatNamespace.to(recipientSocketId).emit('receive_message', privateMessage);
-      chatNamespace.to(recipientSocketId).emit('push_notification', {
-        title: `New private message from ${sender}`,
-        body: privateMessage.message || (privateMessage.file ? privateMessage.file.name : 'Media message')
+    try {
+      const sanitizedUsername = sanitizeInput(username);
+      const sanitizedRoom = sanitizeInput(room);
+      
+      socket.to(sanitizedRoom).emit('typing', { 
+        username: sanitizedUsername, 
+        isTyping: Boolean(isTyping), 
+        timestamp: new Date() 
       });
-    }
-    socket.emit('receive_message', privateMessage);
-
-    if (_clientId) {
-      socket.emit('message_ack', { _clientId });
+    } catch (error) {
+      console.error('Error in typing:', error);
     }
   });
 
-  socket.on('disconnect', () => {
-    const user = users[socket.id];
-    if (user) {
-      chatNamespace.to(user.room).emit('user_event', { type: 'leave', user: user.name });
-      // Remove socket from nameToSockets
-      if (nameToSockets[user.name]) {
-        nameToSockets[user.name] = nameToSockets[user.name].filter(id => id !== socket.id);
-        if (nameToSockets[user.name].length === 0) delete nameToSockets[user.name];
+  socket.on('send_message', async (data) => {
+    try {
+      const user = users[socket.id];
+      const sender = user?.name || 'Anonymous';
+      const room = sanitizeInput(data.room) || user?.room;
+      const avatar = user?.avatar || sanitizeInput(data.avatar) || null;
+
+      if (!room) {
+        socket.emit('message_error', { error: 'Room is required' });
+        return;
       }
-      delete users[socket.id];
-      const roomUsers = Object.values(users)
-        .filter(u => u.room === user.room)
-        .map(u => u.name);
-      chatNamespace.to(user.room).emit('active_users', roomUsers);
+
+      if (!data.message && !data.image && !data.voice && !data.file) {
+        socket.emit('message_error', { error: 'Message content is required' });
+        return;
+      }
+
+      const messageData = {
+        sender,
+        room,
+        avatar,
+        message: sanitizeInput(data.message) || '',
+        image: data.image || null,
+        voice: data.voice || null,
+        file: data.file || null,
+        timestamp: new Date(),
+        private: false,
+        readBy: [sender],
+        reactions: []
+      };
+
+      const savedMessage = await Message.create(messageData);
+      messageData._id = savedMessage._id;
+
+      chatNamespace.to(room).emit('receive_message', messageData);
+
+      socket.emit('message_sent', { 
+        messageId: savedMessage._id,
+        timestamp: messageData.timestamp
+      });
+      
+    } catch (error) {
+      console.error('Send message error:', error);
+      socket.emit('message_error', { error: 'Failed to send message' });
+    }
+  });
+
+  socket.on('disconnect', (reason) => {
+    console.log(`❌ User disconnected: ${socket.id}, reason: ${reason}`);
+    
+    try {
+      const user = users[socket.id];
+      if (user) {
+        socket.to(user.room).emit('user_event', { 
+          type: 'leave', 
+          user: user.name,
+          timestamp: new Date()
+        });
+        
+        if (nameToSockets[user.name]) {
+          nameToSockets[user.name] = nameToSockets[user.name].filter(id => id !== socket.id);
+          if (nameToSockets[user.name].length === 0) {
+            delete nameToSockets[user.name];
+          }
+        }
+        
+        delete users[socket.id];
+        
+        const roomUsers = Object.values(users)
+          .filter(u => u.room === user.room)
+          .map(u => ({ 
+            name: u.name, 
+            avatar: u.avatar,
+            joinedAt: u.joinedAt
+          }));
+        
+        chatNamespace.to(user.room).emit('active_users', roomUsers);
+      }
+    } catch (error) {
+      console.error('Error handling disconnect:', error);
     }
   });
 });
 
-const PORT = 5000;
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Server is running on http://192.168.0.203:${PORT}`);
+// Enhanced error handling middleware
+app.use((error, req, res, next) => {
+  console.error('Error:', error);
+  
+  if (error.message === 'Not allowed by CORS') {
+    return res.status(403).json({ error: 'CORS policy violation' });
+  }
+  
+  if (error.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Invalid JSON data' });
+  }
+  
+  if (error.code === 'LIMIT_FILE_SIZE') {
+    return res.status(400).json({ error: 'File too large' });
+  }
+  
+  res.status(500).json({ error: 'Internal server error' });
 });
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ error: 'Route not found' });
+});
+
+// Graceful shutdown
+const gracefulShutdown = () => {
+  console.log('🔄 Shutting down gracefully...');
+  server.close(() => {
+    mongoose.connection.close();
+    process.exit(0);
+  });
+};
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
+
+// Start server
+if (NODE_ENV !== 'test') {
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log('🚀 ===================================');
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🌍 Environment: ${NODE_ENV}`);
+    console.log(`📁 Uploads directory: ${uploadsDir}`);
+    
+    if (NODE_ENV === 'development') {
+      console.log(`🏠 Local access: http://192.168.0.203:${PORT}`);
+      console.log(`📡 Health check: http://192.168.0.203:${PORT}/api/health`);
+    }
+    
+    console.log('🚀 ===================================');
+  });
+}
+
+module.exports = { app, server };

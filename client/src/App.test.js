@@ -1,8 +1,21 @@
-import { render, screen } from '@testing-library/react';
+import { render, cleanup } from '@testing-library/react';
+import '@testing-library/jest-dom';
 import App from './App';
 
-test('renders learn react link', () => {
-  render(<App />);
-  const linkElement = screen.getByText(/learn react/i);
-  expect(linkElement).toBeInTheDocument();
+describe('App Component', () => {
+  beforeEach(() => {
+    // Ensure localStorage returns null for all keys
+    localStorage.getItem = jest.fn(() => null);
+  });
+
+  afterEach(() => {
+    cleanup();
+    jest.clearAllMocks();
+  });
+
+  test('renders App component without crashing', () => {
+    const { container } = render(<App />);
+    expect(container).toBeInTheDocument();
+    expect(container.firstChild).toBeInTheDocument();
+  });
 });
