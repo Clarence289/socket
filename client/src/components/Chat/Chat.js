@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import queryString from 'query-string';
@@ -8,8 +8,32 @@ import './Chat.css';
 const NOTIFICATION_SOUND_URL = "https://assets.mixkit.co/sfx/preview/mixkit-bell-notification-933.mp3";
 const NAMESPACE = '/chat';
 
-// Updated: Dynamic API URL configuration for local/production
-const API_URL = process.env.REACT_APP_API_URL || 'http://192.168.0.203:5000';
+// 🌐 PRODUCTION-READY: Smart URL detection for cloud deployment
+const getApiUrl = () => {
+  // Priority 1: Environment variables (set during deployment)
+  if (process.env.REACT_APP_API_URL) {
+    return process.env.REACT_APP_API_URL;
+  }
+  
+  // Priority 2: Production auto-detection for Netlify frontend
+  if (process.env.NODE_ENV === 'production') {
+    // Auto-detect backend URL based on Netlify frontend URL
+    const frontendUrl = window.location.origin;
+    
+    // If frontend is on Netlify, assume backend is on Render
+    if (frontendUrl.includes('netlify.app')) {
+      // Convert: https://socket.netlify.app -> https://socket.onrender.com
+      return frontendUrl.replace('.netlify.app', '.onrender.com');
+    }
+    
+    // Fallback for custom domains
+    return frontendUrl.replace('www.', 'api.');
+  }
+  
+  // Priority 3: Development fallback
+  return 'http://localhost:5000';
+};
+const API_URL = getApiUrl();
 const SOCKET_URL = process.env.REACT_APP_SOCKET_URL || API_URL;
 
 const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '👏'];
@@ -25,19 +49,19 @@ function TypingDots() {
   return <span>{dots}</span>;
 }
 
-const Chat = ({ onLeave }) => {
+const Chat = ({ onLeave, user }) => {
   const { search } = useLocation();
   const navigate = useNavigate();
   
   // Fix for undefined params issue - added safety checks
   const params = queryString.parse(search) || {};
-  const name = params.name || localStorage.getItem('chat_name') || '';
+  const name = params.name || user?.email || localStorage.getItem('chat_name') || '';
   const room = params.room || localStorage.getItem('chat_room') || '';
   const avatar = params.avatar || localStorage.getItem('chat_avatar') || null;
 
   useEffect(() => {
     if (!name || !room) {
-      navigate('/');
+      navigate('/join');
     }
   }, [name, room, navigate]);
 
@@ -73,6 +97,22 @@ const Chat = ({ onLeave }) => {
   const socketRef = useRef();
   const longPressTimerRef = useRef(null);
 
+  // 🔧 Development logging helper
+  const devLog = useCallback((message, ...args) => {
+    if (process.env.NODE_ENV === 'development') {
+      // eslint-disable-next-line no-console
+      console.log(message, ...args);
+    }
+  }, []);
+
+  // 🔧 Error logging helper
+  const errorLog = useCallback((message, ...args) => {
+    if (process.env.NODE_ENV === 'development') {
+      // eslint-disable-next-line no-console
+      console.error(message, ...args);
+    }
+  }, []);
+
   // Enhanced message fetching with error handling
   useEffect(() => {
     const fetchMessages = async () => {
@@ -82,14 +122,14 @@ const Chat = ({ onLeave }) => {
           const data = await res.json();
           setMessages(data?.messages || data || []);
         } else {
-          console.error('Failed to fetch messages:', res.statusText);
+          errorLog('Failed to fetch messages:', res.statusText);
           setMessages([]);
           if (res.status >= 500) {
             setConnectionError('Server error. Please try again later.');
           }
         }
       } catch (err) {
-        console.error('Failed to fetch messages:', err);
+        errorLog('Failed to fetch messages:', err);
         setMessages([]);
         setConnectionError('Network error. Check your connection.');
       }
@@ -97,7 +137,7 @@ const Chat = ({ onLeave }) => {
     if (room) {
       fetchMessages();
     }
-  }, [room]);
+  }, [room, errorLog]);
 
   useEffect(() => {
     const setInteracted = () => setUserInteracted(true);
@@ -115,21 +155,23 @@ const Chat = ({ onLeave }) => {
     }
   }, []);
 
-  // Enhanced Socket.IO connection with better error handling
+  // Enhanced Socket.IO connection with better cloud performance
   useEffect(() => {
     if (!name || !room) return;
 
     try {
-      console.log(`🔌 Connecting to: ${SOCKET_URL}${NAMESPACE}`);
+      devLog(`🔌 Connecting to: ${SOCKET_URL}${NAMESPACE}`);
       
       socketRef.current = io(SOCKET_URL + NAMESPACE, {
-        transports: ['websocket', 'polling'], // Added polling as fallback
+        transports: ['websocket', 'polling'], // Polling fallback for cloud
         reconnection: true,
-        reconnectionAttempts: 10,
-        reconnectionDelay: 1000,
-        reconnectionDelayMax: 5000,
-        timeout: 20000,
+        reconnectionAttempts: 15,
+        reconnectionDelay: 2000,
+        reconnectionDelayMax: 10000,
+        timeout: 30000, // Increased for cloud latency
         forceNew: true,
+        upgrade: true,
+        rememberUpgrade: true,
       });
       
       const socket = socketRef.current;
@@ -138,14 +180,14 @@ const Chat = ({ onLeave }) => {
         socket.emit('user_join', { name, room, avatar });
 
         socket.on('connect', () => {
-          console.log('✅ Socket connected successfully');
+          devLog('✅ Socket connected successfully');
           setIsConnected(true);
           setIsReconnecting(false);
           setConnectionError(null);
         });
 
         socket.on('disconnect', (reason) => {
-          console.log('❌ Socket disconnected:', reason);
+          devLog('❌ Socket disconnected:', reason);
           setIsConnected(false);
           if (reason === 'io server disconnect') {
             setConnectionError('Server disconnected. Please refresh the page.');
@@ -155,18 +197,18 @@ const Chat = ({ onLeave }) => {
         });
 
         socket.on('connect_error', (error) => {
-          console.error('🔥 Connection error:', error);
+          errorLog('🔥 Connection error:', error);
           setConnectionError('Failed to connect to server. Please check your connection.');
           setIsConnected(false);
         });
 
         socket.on('reconnect_attempt', (attemptNumber) => {
-          console.log(`🔄 Reconnection attempt ${attemptNumber}`);
+          devLog(`🔄 Reconnection attempt ${attemptNumber}`);
           setIsReconnecting(true);
         });
 
         socket.on('reconnect', (attemptNumber) => {
-          console.log(`✅ Reconnected after ${attemptNumber} attempts`);
+          devLog(`✅ Reconnected after ${attemptNumber} attempts`);
           setIsConnected(true);
           setIsReconnecting(false);
           setConnectionError(null);
@@ -175,7 +217,7 @@ const Chat = ({ onLeave }) => {
         });
 
         socket.on('reconnect_failed', () => {
-          console.error('❌ Failed to reconnect');
+          errorLog('❌ Failed to reconnect');
           setConnectionError('Failed to reconnect. Please refresh the page.');
           setIsReconnecting(false);
         });
@@ -194,7 +236,7 @@ const Chat = ({ onLeave }) => {
               const audio = new Audio(NOTIFICATION_SOUND_URL);
               audio.play().catch(() => {});
             } catch (err) {
-              console.error('Audio play failed:', err);
+              errorLog('Audio play failed:', err);
             }
           }
           
@@ -251,7 +293,7 @@ const Chat = ({ onLeave }) => {
               const audio = new Audio(NOTIFICATION_SOUND_URL);
               audio.play().catch(() => {});
             } catch (err) {
-              console.error('Audio play failed:', err);
+              errorLog('Audio play failed:', err);
             }
           }
         });
@@ -261,8 +303,8 @@ const Chat = ({ onLeave }) => {
           setPendingMessages(prev => prev.filter(pm => pm._clientId !== ack._clientId));
         });
 
-        socket.on('message_reaction', ({ msgId, reaction, user }) => {
-          if (!msgId || !reaction || !user) return;
+        socket.on('message_reaction', ({ msgId, reaction, user: reactionUser }) => {
+          if (!msgId || !reaction || !reactionUser) return;
           
           setMessages(prev =>
             prev.map(m =>
@@ -271,7 +313,7 @@ const Chat = ({ onLeave }) => {
                     ...m,
                     reactions: [
                       ...(m.reactions || []),
-                      { reaction, user }
+                      { reaction, user: reactionUser }
                     ]
                   }
                 : m
@@ -280,12 +322,12 @@ const Chat = ({ onLeave }) => {
         });
 
         socket.on('error', (error) => {
-          console.error('Socket error:', error);
+          errorLog('Socket error:', error);
           setConnectionError('Communication error with server.');
         });
       }
     } catch (err) {
-      console.error('Failed to initialize socket:', err);
+      errorLog('Failed to initialize socket:', err);
       setConnectionError('Failed to initialize connection.');
     }
 
@@ -294,7 +336,7 @@ const Chat = ({ onLeave }) => {
         socketRef.current.disconnect();
       }
     };
-  }, [name, room, avatar, userInteracted]);
+  }, [name, room, avatar, userInteracted, devLog, errorLog]);
 
   useEffect(() => {
     if (messagesEndRef.current && typeof messagesEndRef.current.scrollIntoView === 'function') {
@@ -319,12 +361,12 @@ const Chat = ({ onLeave }) => {
           ]);
         }
       } catch (err) {
-        console.error('Failed to mark messages as read:', err);
+        errorLog('Failed to mark messages as read:', err);
       }
     };
     window.addEventListener('focus', handleFocus);
     return () => window.removeEventListener('focus', handleFocus);
-  }, [messages, room, name, pendingMessages]);
+  }, [messages, room, name, pendingMessages, errorLog]);
 
   useEffect(() => {
     if (unreadCount > 0) {
@@ -352,7 +394,7 @@ const Chat = ({ onLeave }) => {
         }, 100);
       }
     } catch (err) {
-      console.error('Failed to load older messages:', err);
+      errorLog('Failed to load older messages:', err);
     }
     setLoadingOlder(false);
   };
@@ -393,7 +435,7 @@ const Chat = ({ onLeave }) => {
         setRecordingTime(0);
       };
     } catch (err) {
-      console.error('Failed to start recording:', err);
+      errorLog('Failed to start recording:', err);
       alert('Failed to access microphone.');
     }
   };
@@ -418,7 +460,7 @@ const Chat = ({ onLeave }) => {
         throw new Error('Delete failed');
       }
     } catch (err) {
-      console.error('Failed to delete message:', err);
+      errorLog('Failed to delete message:', err);
       alert('Failed to delete message');
     }
   };
@@ -440,7 +482,7 @@ const Chat = ({ onLeave }) => {
         throw new Error('Edit failed');
       }
     } catch (err) {
-      console.error('Failed to edit message:', err);
+      errorLog('Failed to edit message:', err);
       alert('Failed to edit message');
     }
   };
@@ -458,7 +500,7 @@ const Chat = ({ onLeave }) => {
     setHighlightedMsgId(null);
   };
 
-  const sendMessage = (msg = message, img = null, voice = null, fromVoice = false, file = null) => {
+  const sendMessage = useCallback((msg = message, img = null, voice = null, fromVoice = false, file = null) => {
     if (!socketRef.current || typeof socketRef.current.emit !== 'function') return;
     
     const messageText = msg?.trim() || '';
@@ -589,7 +631,7 @@ const Chat = ({ onLeave }) => {
       socketRef.current.emit('typing', { username: name, room, isTyping: false });
     }
     setIsSenderTyping(false);
-  };
+  }, [message, recipient, name, room]);
 
   const handleSearch = async (e) => {
     e.preventDefault();
@@ -603,7 +645,7 @@ const Chat = ({ onLeave }) => {
         setSearchResults([]);
       }
     } catch (err) {
-      console.error('Search failed:', err);
+      errorLog('Search failed:', err);
       setSearchResults([]);
     }
   };
@@ -666,7 +708,7 @@ const Chat = ({ onLeave }) => {
           Disconnected. Trying to reconnect...
         </div>
       )}
-      {isReconnecting && isConnected && (
+      {isReconnecting && (
         <div style={{ 
           background: '#dfe6e9', 
           color: '#636e72', 
@@ -716,6 +758,22 @@ const Chat = ({ onLeave }) => {
             margin: '8px 0' 
           }}>
             🔧 API: {API_URL} | Socket: {SOCKET_URL} | Connected: {isConnected ? '✅' : '❌'}
+          </div>
+        )}
+        
+        {/* Production connection status */}
+        {process.env.NODE_ENV === 'production' && (
+          <div style={{ 
+            fontSize: '0.9em', 
+            color: isConnected ? '#00b894' : '#e17055', 
+            padding: '6px 12px', 
+            background: isConnected ? '#d1f2eb' : '#fff5f5', 
+            borderRadius: 8, 
+            margin: '8px 0',
+            border: `1px solid ${isConnected ? '#00b894' : '#fab1a0'}`,
+            textAlign: 'center'
+          }}>
+            🌐 {isConnected ? 'Connected to Cloud Server' : 'Connection Issue - Check Internet'}
           </div>
         )}
         

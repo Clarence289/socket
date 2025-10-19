@@ -13,7 +13,7 @@
     "lint": "echo 'Linting skipped'",
     "postinstall": "npm prune --production"
   },
-  "keywords": ["chat", "socket.io", "express", "mongodb", "real-time", "websocket"],
+  "keywords": ["chat", "socket.io", "express", "mongodb", "real-time", "websocket", "netlify", "render"],
   "author": "Your Name",
   "license": "MIT",
   "engines": {
@@ -40,5 +40,13 @@
     "nodemon": "^3.0.2",
     "socket.io-client": "^4.7.4",
     "supertest": "^6.3.3"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Clarence289/socket.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Clarence289/socket/issues"
+  },
+  "homepage": "https://github.com/Clarence289/socket#readme"
 }

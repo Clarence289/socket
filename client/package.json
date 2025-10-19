@@ -1,7 +1,11 @@
 {
-  "name": "client",
-  "version": "0.1.0",
+  "name": "chat-app-client",
+  "version": "1.0.0",
   "private": true,
+  "description": "Real-time chat application frontend",
+  "author": "Your Name",
+  "license": "MIT",
+  "homepage": ".",
   "dependencies": {
     "@emoji-mart/react": "^1.1.1",
     "@testing-library/dom": "^10.4.0",
@@ -23,32 +27,75 @@
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
+    "build:production": "NODE_ENV=production GENERATE_SOURCEMAP=false react-scripts build",
+    "build:analyze": "npm run build && npx webpack-bundle-analyzer build/static/js/*.js",
     "test": "react-scripts test --watchAll=false --testTimeout=10000",
     "test:watch": "react-scripts test",
     "test:coverage": "react-scripts test --coverage --watchAll=false",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "serve": "npx serve -s build -l 3000",
+    "lint": "eslint src/ --ext .js,.jsx,.ts,.tsx",
+    "lint:fix": "eslint src/ --ext .js,.jsx,.ts,.tsx --fix",
+    "format": "prettier --write \"src/**/*.{js,jsx,ts,tsx,json,css,scss,md}\"",
+    "type-check": "echo 'No TypeScript in this project'",
+    "pre-commit": "npm run lint && npm run test",
+    "deploy:netlify": "npm run build:production && netlify deploy --prod --dir=build",
+    "deploy:surge": "npm run build:production && surge build/ --domain chat-app-production.surge.sh"
   },
   "eslintConfig": {
     "extends": [
       "react-app",
       "react-app/jest"
-    ]
+    ],
+    "rules": {
+      "no-console": "warn",
+      "no-unused-vars": "warn",
+      "react-hooks/exhaustive-deps": "warn"
+    }
   },
   "browserslist": {
     "production": [
       ">0.2%",
       "not dead",
-      "not op_mini all"
+      "not op_mini all",
+      "not ie <= 11",
+      "not chrome < 60",
+      "not safari < 10",
+      "not firefox < 60"
     ],
     "development": [
       "last 1 chrome version",
       "last 1 firefox version",
-      "last 1 safari version"
+      "last 1 safari version",
+      "last 1 edge version"
     ]
   },
   "devDependencies": {
     "autoprefixer": "^10.4.21",
     "postcss": "^8.5.6",
-    "tailwindcss": "^4.1.11"
-  }
+    "tailwindcss": "^4.1.11",
+    "eslint": "^8.57.0",
+    "prettier": "^3.1.0",
+    "webpack-bundle-analyzer": "^4.10.1"
+  },
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=8.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Clarence289/socket.git"
+  },
+  "keywords": [
+    "react",
+    "chat",
+    "socket.io",
+    "real-time",
+    "messaging",
+    "websocket"
+  ],
+  "bugs": {
+    "url": "https://github.com/Clarence289/socket/issues"
+  },
+  "proxy": "http://localhost:5000"
 }

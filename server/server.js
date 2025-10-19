@@ -40,16 +40,18 @@ const server = http.createServer(app);
 // Trust proxy for hosting platforms
 app.set('trust proxy', 1);
 
-// Security middleware
+// 🔧 ENHANCED Security middleware for mobile & production
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" },
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      connectSrc: ["'self'", "ws:", "wss:"],
-      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'", "ws:", "wss:", "https:", "http:"],
+      imgSrc: ["'self'", "data:", "https:", "http:"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       scriptSrc: ["'self'"],
+      mediaSrc: ["'self'", "data:", "https:", "http:"],
+      fontSrc: ["'self'", "https:", "data:"],
     },
   }
 }));
@@ -57,19 +59,19 @@ app.use(helmet({
 // Compression middleware
 app.use(compression());
 
-// Rate limiting - more restrictive in production
+// Rate limiting - mobile-friendly
 const createRateLimit = (windowMs, max, message) => rateLimit({
   windowMs,
   max: NODE_ENV === 'production' ? max : max * 10,
   message: { error: message },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => NODE_ENV === 'development' && req.ip === '127.0.0.1'
+  skip: (req) => NODE_ENV === 'development'
 });
 
-app.use('/api/auth', createRateLimit(15 * 60 * 1000, 5, 'Too many authentication attempts'));
-app.use('/api/upload', createRateLimit(60 * 1000, 10, 'Too many file uploads'));
-app.use('/api', createRateLimit(15 * 60 * 1000, 100, 'Too many requests'));
+app.use('/api/auth', createRateLimit(15 * 60 * 1000, 10, 'Too many authentication attempts'));
+app.use('/api/upload', createRateLimit(60 * 1000, 20, 'Too many file uploads'));
+app.use('/api', createRateLimit(15 * 60 * 1000, 200, 'Too many requests'));
 
 // Create uploads directory
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -78,16 +80,20 @@ if (!fs.existsSync(uploadsDir)) {
   console.log('📁 Created uploads directory');
 }
 
-// Enhanced CORS configuration for local network + production
+// 🌐 ENHANCED CORS - Mobile & Production Ready
 const allowedOrigins = [
   process.env.FRONTEND_URL,
+  // 📱 Mobile app origins
+  'capacitor://localhost',
+  'ionic://localhost',
+  'http://localhost',
+  'https://localhost',
   // Local development origins
   ...(NODE_ENV === 'development' ? [
     'http://localhost:3000',
     'http://localhost:5173',
     'http://127.0.0.1:3000',
     'http://127.0.0.1:5173',
-    // Your local network IP addresses
     'http://192.168.0.203:3000',
     'http://192.168.0.203:5173',
     'http://192.168.0.203:5174',
@@ -99,12 +105,14 @@ const allowedOrigins = [
   'https://*.onrender.com',
   'https://*.railway.app',
   'https://*.fly.dev',
-  'https://*.herokuapp.com'
+  'https://*.herokuapp.com',
+  'https://*.firebase.app',
+  'https://*.firebaseapp.com'
 ].filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (mobile apps, curl, etc.)
+    // 📱 Allow mobile apps and requests with no origin
     if (!origin) return callback(null, true);
     
     // Check if origin matches any allowed pattern
@@ -120,17 +128,23 @@ app.use(cors({
       return callback(null, true);
     }
     
+    // 🌐 Production: Allow all HTTPS origins for mobile compatibility
+    if (NODE_ENV === 'production' && origin.startsWith('https://')) {
+      console.log(`✅ Allowing HTTPS origin: ${origin}`);
+      return callback(null, true);
+    }
+    
     console.warn(`❌ CORS blocked origin: ${origin}`);
     callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
 }));
 
 // Body parsing middleware with error handling
 app.use(express.json({ 
-  limit: '10mb',
+  limit: '25mb', // Increased for mobile images
   verify: (req, res, buf) => {
     try {
       JSON.parse(buf);
@@ -140,18 +154,21 @@ app.use(express.json({
     }
   }
 }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-// Serve static files with proper headers
+// 📱 Mobile-optimized static file serving
 app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
-  maxAge: NODE_ENV === 'production' ? '7d' : '0',
-  setHeaders: (res, path, stat) => {
+  maxAge: NODE_ENV === 'production' ? '30d' : '0',
+  setHeaders: (res, filepath, stat) => {
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Range, Content-Length');
+    res.setHeader('Accept-Ranges', 'bytes');
   }
 }));
 
-// Enhanced file upload configuration
+// 📱 Enhanced file upload for mobile
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, uploadsDir);
@@ -167,18 +184,18 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: NODE_ENV === 'production' ? 10 * 1024 * 1024 : 50 * 1024 * 1024, // 10MB prod, 50MB dev
+    fileSize: NODE_ENV === 'production' ? 25 * 1024 * 1024 : 100 * 1024 * 1024, // 25MB prod, 100MB dev
     files: 1,
   },
   fileFilter: (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx|txt|mp3|mp4|avi|mov|webp/;
+    const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx|txt|mp3|mp4|avi|mov|webp|heic|heif|webm|ogg|wav|m4a/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedTypes.test(file.mimetype);
+    const mimetype = allowedTypes.test(file.mimetype) || file.mimetype.startsWith('image/') || file.mimetype.startsWith('audio/') || file.mimetype.startsWith('video/');
     
     if (mimetype && extname) {
       return cb(null, true);
     } else {
-      cb(new Error('Invalid file type. Only images, documents, and media files are allowed.'));
+      cb(new Error('Invalid file type. Images, documents, and media files are allowed.'));
     }
   }
 });
@@ -195,7 +212,7 @@ const connectDB = async (retries = 5) => {
       useNewUrlParser: true,
       useUnifiedTopology: true,
       maxPoolSize: 10,
-      serverSelectionTimeoutMS: 5000,
+      serverSelectionTimeoutMS: 10000,
       socketTimeoutMS: 45000,
     });
     
@@ -272,13 +289,21 @@ if (NODE_ENV === 'development') {
   });
 }
 
-// Root endpoint
+// 🌐 Enhanced root endpoint
 app.get('/', (req, res) => {
   res.json({
-    message: 'Chat App Server is running!',
-    version: '1.0.0',
+    message: '🚀 Chat App Server is running!',
+    version: '2.0.0',
     environment: NODE_ENV,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    features: [
+      '📱 Mobile-optimized',
+      '🌐 Cloud-ready',
+      '🔒 Secure authentication',
+      '💬 Real-time chat',
+      '📁 File uploads',
+      '🔍 Message search'
+    ]
   });
 });
 
@@ -298,8 +323,10 @@ app.get('/api/health', (req, res) => {
     mongodb: statusMap[mongoStatus] || 'unknown',
     uptime: Math.floor(process.uptime()),
     environment: NODE_ENV,
-    version: '1.0.0',
-    memory: process.memoryUsage()
+    version: '2.0.0',
+    memory: process.memoryUsage(),
+    mobile_ready: true,
+    cloud_ready: true
   });
 });
 
@@ -341,7 +368,7 @@ app.post('/api/register', async (req, res) => {
     const token = jwt.sign(
       { id: user._id, email: user.email }, 
       JWT_SECRET, 
-      { expiresIn: '7d' }
+      { expiresIn: '30d' } // Longer for mobile
     );
     
     res.status(201).json({ 
@@ -390,7 +417,7 @@ app.post('/api/login', async (req, res) => {
     const token = jwt.sign(
       { id: user._id, email: user.email }, 
       JWT_SECRET, 
-      { expiresIn: '7d' }
+      { expiresIn: '30d' } // Longer for mobile
     );
     
     res.json({ 
@@ -433,18 +460,25 @@ app.get('/api/profile', verifyToken, async (req, res) => {
   }
 });
 
-// Enhanced file upload endpoint
+// 📱 Enhanced file upload endpoint - Mobile optimized
 app.post('/api/upload', upload.single('file'), (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    // Dynamic URL generation for local vs production
+    // 🌐 Smart URL generation for mobile & production
     const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
     const host = req.headers['x-forwarded-host'] || req.headers.host;
-    const baseUrl = process.env.SERVER_URL || 
-      (NODE_ENV === 'production' ? `${protocol}://${host}` : `http://192.168.0.203:${PORT}`);
+    
+    let baseUrl;
+    if (process.env.SERVER_URL) {
+      baseUrl = process.env.SERVER_URL;
+    } else if (NODE_ENV === 'production') {
+      baseUrl = `${protocol}://${host}`;
+    } else {
+      baseUrl = `http://localhost:${PORT}`;
+    }
     
     const fileUrl = `${baseUrl}/uploads/${req.file.filename}`;
     
@@ -462,7 +496,7 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
     console.error('Upload error:', error);
     
     if (error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ error: `File too large. Maximum size is ${NODE_ENV === 'production' ? '10MB' : '50MB'}.` });
+      return res.status(400).json({ error: `File too large. Maximum size is ${NODE_ENV === 'production' ? '25MB' : '100MB'}.` });
     }
     
     res.status(500).json({ error: 'Upload failed. Please try again.' });
@@ -509,6 +543,86 @@ app.get('/api/messages', async (req, res) => {
   }
 });
 
+// 📱 Add messages read endpoint for mobile
+app.post('/api/messages/read', async (req, res) => {
+  try {
+    const { room, email } = req.body;
+    
+    if (!room || !email) {
+      return res.status(400).json({ error: 'Room and email are required' });
+    }
+
+    const sanitizedRoom = sanitizeInput(room);
+    const sanitizedEmail = sanitizeInput(email);
+
+    // Mark messages as read (optional feature)
+    await Message.updateMany(
+      { 
+        room: sanitizedRoom, 
+        sender: { $ne: sanitizedEmail },
+        readBy: { $ne: sanitizedEmail }
+      },
+      { $addToSet: { readBy: sanitizedEmail } }
+    );
+
+    res.json({ success: true, message: 'Messages marked as read' });
+    
+  } catch (error) {
+    console.error('Mark read error:', error);
+    res.status(500).json({ error: 'Failed to mark messages as read' });
+  }
+});
+
+// 🔧 Add message edit/delete endpoints
+app.put('/api/messages/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { message } = req.body;
+    
+    if (!message?.trim()) {
+      return res.status(400).json({ error: 'Message content is required' });
+    }
+
+    const updatedMessage = await Message.findByIdAndUpdate(
+      id,
+      { 
+        message: sanitizeInput(message.trim()),
+        edited: true,
+        editedAt: new Date()
+      },
+      { new: true }
+    );
+
+    if (!updatedMessage) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+
+    res.json({ success: true, message: updatedMessage });
+    
+  } catch (error) {
+    console.error('Edit message error:', error);
+    res.status(500).json({ error: 'Failed to edit message' });
+  }
+});
+
+app.delete('/api/messages/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const deletedMessage = await Message.findByIdAndDelete(id);
+
+    if (!deletedMessage) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+
+    res.json({ success: true, message: 'Message deleted' });
+    
+  } catch (error) {
+    console.error('Delete message error:', error);
+    res.status(500).json({ error: 'Failed to delete message' });
+  }
+});
+
 app.get('/api/search', async (req, res) => {
   try {
     const { room, q, limit = 20 } = req.query;
@@ -549,7 +663,7 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
-// Enhanced Socket.IO setup
+// 📱 Enhanced Socket.IO setup - Mobile & Production Ready
 const io = new Server(server, {
   cors: {
     origin: function (origin, callback) {
@@ -563,7 +677,7 @@ const io = new Server(server, {
         return allowedOrigin === origin;
       });
       
-      if (isAllowed) {
+      if (isAllowed || (NODE_ENV === 'production' && origin.startsWith('https://'))) {
         return callback(null, true);
       }
       
@@ -572,9 +686,11 @@ const io = new Server(server, {
     methods: ['GET', 'POST'],
     credentials: true,
   },
-  maxHttpBufferSize: NODE_ENV === 'production' ? 5e6 : 1e8, // 5MB prod, 100MB dev
+  maxHttpBufferSize: NODE_ENV === 'production' ? 25e6 : 100e6, // 25MB prod, 100MB dev
   pingTimeout: 60000,
   pingInterval: 25000,
+  upgradeTimeout: 30000,
+  transports: ['websocket', 'polling'], // Mobile compatibility
 });
 
 const chatNamespace = io.of('/chat');
@@ -670,15 +786,19 @@ chatNamespace.on('connection', (socket) => {
         timestamp: new Date(),
         private: false,
         readBy: [sender],
-        reactions: []
+        reactions: [],
+        _clientId: data._clientId // For client-side tracking
       };
 
       const savedMessage = await Message.create(messageData);
       messageData._id = savedMessage._id;
 
+      // Emit to all clients in room
       chatNamespace.to(room).emit('receive_message', messageData);
 
-      socket.emit('message_sent', { 
+      // Send acknowledgment to sender
+      socket.emit('message_ack', { 
+        _clientId: data._clientId,
         messageId: savedMessage._id,
         timestamp: messageData.timestamp
       });
@@ -686,6 +806,40 @@ chatNamespace.on('connection', (socket) => {
     } catch (error) {
       console.error('Send message error:', error);
       socket.emit('message_error', { error: 'Failed to send message' });
+    }
+  });
+
+  // 🔧 Add message reaction support
+  socket.on('message_reaction', async ({ msgId, reaction, user, room }) => {
+    try {
+      const sanitizedMsgId = sanitizeInput(msgId);
+      const sanitizedReaction = sanitizeInput(reaction);
+      const sanitizedUser = sanitizeInput(user);
+      const sanitizedRoom = sanitizeInput(room);
+
+      // Save reaction to database (optional)
+      await Message.findByIdAndUpdate(
+        sanitizedMsgId,
+        { 
+          $addToSet: { 
+            reactions: { 
+              reaction: sanitizedReaction, 
+              user: sanitizedUser,
+              timestamp: new Date()
+            } 
+          } 
+        }
+      );
+
+      // Broadcast reaction to room
+      chatNamespace.to(sanitizedRoom).emit('message_reaction', {
+        msgId: sanitizedMsgId,
+        reaction: sanitizedReaction,
+        user: sanitizedUser
+      });
+
+    } catch (error) {
+      console.error('Reaction error:', error);
     }
   });
 
@@ -769,10 +923,12 @@ if (NODE_ENV !== 'test') {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🌍 Environment: ${NODE_ENV}`);
     console.log(`📁 Uploads directory: ${uploadsDir}`);
+    console.log(`📱 Mobile-ready: YES`);
+    console.log(`🌐 Cloud-ready: YES`);
     
     if (NODE_ENV === 'development') {
-      console.log(`🏠 Local access: http://192.168.0.203:${PORT}`);
-      console.log(`📡 Health check: http://192.168.0.203:${PORT}/api/health`);
+      console.log(`🏠 Local access: http://localhost:${PORT}`);
+      console.log(`📡 Health check: http://localhost:${PORT}/api/health`);
     }
     
     console.log('🚀 ===================================');
