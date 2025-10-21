@@ -297,12 +297,6 @@ export default function Login({ onLogin }) {
         
         <div className="login-title">Login</div>
         
-        {/* Connection Status Indicators */}
-        {process.env.NODE_ENV === 'development' && (
-          <div className="debug-info">
-            🔧 Backend: {API_URL}
-          </div>
-        )}
         
         {process.env.NODE_ENV === 'production' && (
           <div className="production-status">
@@ -413,7 +407,7 @@ export default function Login({ onLogin }) {
                 fontSize: '0.85em'
               }}
             >
-              🧪 Use Demo Credentials
+              🧪 Use Credentials
             </button>
           </div>
         )}

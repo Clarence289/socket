@@ -373,13 +373,7 @@ export default function Register({ onRegister }) {
         
         <div className="register-title">Create Account</div>
         
-        {/* Connection Status Indicators */}
-        {process.env.NODE_ENV === 'development' && (
-          <div className="debug-info">
-            🔧 Backend: {API_URL}
-          </div>
-        )}
-        
+               
         {process.env.NODE_ENV === 'production' && (
           <div className="production-status">
             <span>🌐</span>
