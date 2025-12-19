@@ -232,6 +232,8 @@ export default function Register({ onRegister }) {
           }
           .register-eye {
             position: absolute;
+
+            
             right: 14px;
             top: 50%;
             transform: translateY(-50%);
